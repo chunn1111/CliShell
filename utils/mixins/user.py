@@ -107,7 +107,7 @@ class UserMixin:
         upn = _attr('userPrincipalName')
         sid = str(_attr('objectSid', ''))
         display_name = _attr('displayName')
-        uac_val = _attr('userAccountControl', 0) or 0
+        uac_val = int(_attr('userAccountControl', 0) or 0)
         admin_count = _attr('adminCount', 0) or 0
         when_created = _attr('whenCreated', '')
         when_changed = _attr('whenChanged', '')
@@ -140,6 +140,8 @@ class UserMixin:
         enabled = 'No' if uac_val & UAC['ACCOUNTDISABLE'] else 'Yes'
 
         # ── Groups ──
+        # 注意: 每一步独立容错 — memberOf 属性缺失 (用户无直接组) 是正常情况,
+        # 不能让整个块静默跳过 (否则 primary group / 嵌套组都丢了)
         member_of = []
         pgid = None
         primary_group = None
@@ -149,12 +151,21 @@ class UserMixin:
 
         try:
             member_of = entry['memberOf'].values or []
+        except (KeyError, IndexError):
+            pass
+        try:
             pgid = entry['primaryGroupID'].value
+        except (KeyError, IndexError):
+            pass
 
-            if pgid is not None:
+        if pgid is not None:
+            try:
                 primary_group, _ = self._resolve_pgid(pgid)
+            except Exception:
+                primary_group = None
 
-            # 递归查询所有组
+        # 递归查询所有组 (含嵌套)
+        try:
             rec_entries = paged_search(
                 self.client, self.domain_dumper.root,
                 '(member:%s:=%s)' % (LDAP_MATCHING_RULE_IN_CHAIN, escape_filter_chars(dn)),
@@ -164,18 +175,18 @@ class UserMixin:
                 name = e['sAMAccountName'].value
                 if name:
                     recursive_names.add(name)
-
-            for g in member_of:
-                cn_match = re.match(r'CN=([^,]+)', g, re.I)
-                direct_names.append(cn_match.group(1) if cn_match else g)
-
-            if primary_group:
-                direct_names.append(primary_group)
-                recursive_names.add(primary_group)
-
-            nested_names = sorted(recursive_names - set(direct_names))
-        except (KeyError, IndexError):
+        except Exception:
             pass
+
+        for g in member_of:
+            cn_match = re.match(r'CN=([^,]+)', g, re.I)
+            direct_names.append(cn_match.group(1) if cn_match else g)
+
+        if primary_group:
+            direct_names.append(primary_group)
+            recursive_names.add(primary_group)
+
+        nested_names = sorted(recursive_names - set(direct_names))
 
         # ── 构建表格 ──
         # 主表: 横排 key-value
@@ -220,9 +231,16 @@ class UserMixin:
         # DN / SID 等长字段单独一行
         print()
         print_found("DN:  %s" % dn)
+        # OU / 容器信息 (父级 DN)
+        if ',' in dn:
+            print_found("OU:  %s" % dn.split(',', 1)[1])
         if upn:
             print_found("UPN: %s" % upn)
         print_found("SID: %s" % sid)
+        # 登录脚本
+        logon_script = _attr('scriptPath')
+        if logon_script:
+            print_found("Logon Script: %s" % logon_script)
 
     # ── unlock_user ───────────────────────────────────────────
     def do_unlock_user(self, line):
@@ -239,10 +257,26 @@ class UserMixin:
     # ── 内部辅助 ──────────────────────────────────────────────
 
     def _resolve_pgid(self, pgid):
-        """将 primaryGroupID 解析为 (sAMAccountName, DN)"""
+        """将 primaryGroupID 解析为 (sAMAccountName, DN)
+        primaryGroupToken 是构造属性, 不能用于 LDAP 过滤器,
+        改用 domain SID + RID 查 objectSid"""
+        domain_sid = getattr(self, 'domain_sid', '')
+        if not domain_sid:
+            try:
+                self.client.search(
+                    self.domain_dumper.root, '(objectClass=domain)',
+                    attributes=['objectSid'],
+                )
+                if self.client.entries:
+                    domain_sid = str(self.client.entries[0]['objectSid'].value)
+                    self.domain_sid = domain_sid
+            except Exception:
+                pass
+        if not domain_sid:
+            return None, None
         self.client.search(
             self.domain_dumper.root,
-            '(primaryGroupToken=%d)' % pgid,
+            '(objectSid=%s-%d)' % (domain_sid, int(pgid)),
             attributes=['sAMAccountName', 'distinguishedName'],
         )
         if self.client.entries:

@@ -7,10 +7,8 @@ do_get_adcs   — 企业 CA / 证书模板 / ESC1 漏洞检测 / NTAuth / 根 CA
 do_get_wsus   — WSUS 服务器发现 (GPO 扩展 GUID + SPN)
 """
 
-import socket
-
 from utils.ui import print_info, print_success, print_found, print_warn, print_header
-from utils.helpers import paged_search
+from utils.helpers import paged_search, resolve_host_ip
 
 # ═══════════════════════════════════════════════════════════════
 #  ADCS 常量
@@ -109,15 +107,6 @@ def _safe_attrs(entry, attr):
 class AdcsMixin:
     """ADCS / WSUS 基础设施发现命令集"""
 
-    # ── 内部辅助 ──────────────────────────────────────────────
-
-    def _resolve_hostname(self, hostname):
-        """解析主机名为 IP，失败返回 '(unresolved)'"""
-        try:
-            return socket.gethostbyname(hostname)
-        except Exception:
-            return '(unresolved)'
-
     # ── 可复用查询方法 (供 dump 调用) ────────────────────────
 
     def _query_enterprise_cas(self, config_dn):
@@ -140,7 +129,7 @@ class AdcsMixin:
         for e in entries:
             ca_name = _safe_attr(e, 'cn', '')
             dns_host = _safe_attr(e, 'dNSHostName', '')
-            ip = self._resolve_hostname(dns_host) if dns_host else ''
+            ip = (resolve_host_ip(dns_host, self.dc_address) or '(unresolved)') if dns_host else ''
             templates = _safe_attrs(e, 'certificateTemplates')
             result.append({
                 'caName': ca_name,
@@ -380,7 +369,7 @@ class AdcsMixin:
                         print_header("WSUS Service Principal Name")
                         print_found("  Account: %s" % name)
                         if dns:
-                            print_info("  DNS: %s  IP: %s" % (dns, self._resolve_hostname(dns)))
+                            print_info("  DNS: %s  IP: %s" % (dns, resolve_host_ip(dns, self.dc_address) or '(unresolved)'))
                         for spn in wsus_spns:
                             print_info("  SPN: %s" % spn)
             except Exception:

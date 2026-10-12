@@ -166,11 +166,13 @@ class CliShell(
             return []
 
         # 权限映射
+        # [Bugfix] GenericWrite 映射形态是 0x00020028 (RC|SELF|WRITE_PROP),
+        # 0x00020094 是 GENERIC_READ (只读), 不能当写权限
         priv_map = {
             0x000f01ff: 'GenericAll',
             0x00040000: 'WriteDacl',
             0x00080000: 'WriteOwner',
-            0x00020094: 'GenericWrite',
+            0x00020028: 'GenericWrite',
             0x00000001: 'ReadData',
         }
 
@@ -191,7 +193,7 @@ class CliShell(
                     found_privs.add('WriteDacl')
                 if mask & 0x00080000:
                     found_privs.add('WriteOwner')
-                if mask & 0x00020094 == 0x00020094:
+                if mask & 0x00020028 == 0x00020028:
                     found_privs.add('GenericWrite')
                 if mask & 0x00000100:
                     found_privs.add('Delete')

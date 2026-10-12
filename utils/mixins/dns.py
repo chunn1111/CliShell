@@ -17,7 +17,7 @@ from struct import unpack
 from impacket.structure import Structure
 
 from utils.ui import print_info, print_success, print_found, print_warn
-from utils.helpers import parse_args, paged_search
+from utils.helpers import parse_args, paged_search, resolve_host_ip
 
 
 # ═══════════════════════════════════════════════════════════
@@ -327,17 +327,14 @@ class DNSMixin:
             print(fmt.format(*r))
 
     def _dns_resolve(self, hostname):
-        """尝试解析主机名为 IP (先查 LDAP DNS A 记录，再回退系统 DNS)"""
+        """尝试解析主机名为 IP (LDAP DNS A 记录缓存 → 系统 DNS → DC 直查)"""
         # 惰性构建 DNS A 记录缓存 {hostname → IP}
         if not hasattr(self, '_dns_a_cache'):
             self._dns_a_cache = self._build_dns_a_cache()
         if hostname in self._dns_a_cache:
             return self._dns_a_cache[hostname]
-        # 回退: 系统解析器
-        try:
-            return socket.gethostbyname(hostname)
-        except Exception:
-            return None
+        # 回退: resolve_host_ip (系统 DNS → DC 直查, 非域机器兜底)
+        return resolve_host_ip(hostname, self.dc_address)
 
     def _build_dns_a_cache(self):
         """从 LDAP DNS 区域构建 {hostname → IP} 映射"""

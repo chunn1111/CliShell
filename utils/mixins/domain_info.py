@@ -30,10 +30,10 @@ class DomainInfoMixin:
         print_success("Found %d trust(s)" % len(entries))
         for entry in entries:
             name = entry['cn'].value
-            direction = TRUST_DIRECTION.get(entry['trustDirection'].value, 'Unknown')
-            ttype = TRUST_TYPE.get(entry['trustType'].value, 'Unknown')
+            direction = TRUST_DIRECTION.get(int(entry['trustDirection'].value or 0), 'Unknown')
+            ttype = TRUST_TYPE.get(int(entry['trustType'].value or 0), 'Unknown')
             flat = entry['flatName'].value or ''
-            attrs = entry['trustAttributes'].value or 0
+            attrs = int(entry['trustAttributes'].value or 0)
 
             print_found("%s (%s) — Direction: %s, Type: %s, Attributes: 0x%x" % (
                 name, flat, direction, ttype, attrs
@@ -140,7 +140,7 @@ class DomainInfoMixin:
             target = entry['cn'].value
             flat = entry['flatName'].value or ''
             direction = TRUST_DIRECTION.get(entry['trustDirection'].value, '?')
-            attrs = entry['trustAttributes'].value or 0
+            attrs = int(entry['trustAttributes'].value or 0)
 
             # 解析信任属性标志
             flags = []
@@ -175,9 +175,10 @@ class DomainInfoMixin:
         )
         found = False
         for entry in self.client.entries:
-            attrs = entry['trustAttributes'].value or 0
-            # 外部信任: 不是 WithinForest (0x40) 且不是 ForestTransitive (0x08)
-            if not (attrs & 0x00000040) and not (attrs & 0x00000008):
+            attrs = int(entry['trustAttributes'].value or 0)
+            # 外部信任: 不是 WithinForest (0x20) 且不是 ForestTransitive (0x08)
+            # 注: 0x40 是 TREAT_AS_EXTERNAL, 别混淆
+            if not (attrs & 0x00000020) and not (attrs & 0x00000008):
                 direction = TRUST_DIRECTION.get(entry['trustDirection'].value, '?')
                 print_found("%s (%s) [%s]" % (entry['cn'].value, entry['flatName'].value or '', direction))
                 found = True
@@ -193,15 +194,32 @@ class DomainInfoMixin:
             '(objectClass=trustedDomain)',
             attributes=['cn', 'flatName', 'trustDirection', 'trustAttributes'],
         )
-        found = False
+        forest, within, external = [], [], []
         for entry in self.client.entries:
-            attrs = entry['trustAttributes'].value or 0
-            if attrs & 0x00000008:  # FOREST_TRANSITIVE
-                direction = TRUST_DIRECTION.get(entry['trustDirection'].value, '?')
-                print_found("%s (%s) [%s]" % (entry['cn'].value, entry['flatName'].value or '', direction))
-                found = True
-        if not found:
-            print_warn("No forest trusts found")
+            attrs = int(entry['trustAttributes'].value or 0)
+            direction = TRUST_DIRECTION.get(entry['trustDirection'].value, '?')
+            name = "%s (%s) [%s]" % (entry['cn'].value, entry['flatName'].value or '', direction)
+            if attrs & 0x00000008:        # FOREST_TRANSITIVE: 跨林信任
+                forest.append(name)
+            elif attrs & 0x00000020:      # WITHIN_FOREST: 林内
+                within.append(name)
+            else:                         # 其余: 外部/隔离
+                external.append(name + ' (quarantined)' if attrs & 0x4 else name)
+
+        if forest:
+            print_success("Cross-forest trust(s):")
+            for n in forest:
+                print_found(n)
+        else:
+            print_warn("No cross-forest trusts (trustAttributes & FOREST_TRANSITIVE)")
+        if within:
+            print_info("Within-forest (同林) trust(s) — 用 forest_domains 看全林结构:")
+            for n in within:
+                print_found(n)
+        if external:
+            print_info("External/quarantined trust(s):")
+            for n in external:
+                print_found(n)
 
     # ── get_rodc ──────────────────────────────────────────────
 
@@ -394,14 +412,12 @@ class DomainInfoMixin:
     # ── 内部辅助 ──────────────────────────────────────────────
     def _get_config_dn(self):
         """从 server info 获取 Configuration DN"""
-        # ldap3 的 Server.info 通常包含 configurationNamingContext
-        config_dn = None
-        if hasattr(self.client.server, 'other'):
-            for key, val in self.client.server.other.items():
-                if key.lower() == 'configurationnamingcontext':
-                    config_dn = val
-                    break
-        if not config_dn:
-            # 回退：构造标准路径
-            config_dn = 'CN=Configuration,%s' % self.domain_dumper.root
-        return config_dn
+        # RootDSE 属性在 server.info.other 里(不是 server.other)
+        try:
+            val = self.client.server.info.other.get('configurationNamingContext')
+            if val:
+                return val[0] if isinstance(val, list) else val
+        except Exception:
+            pass
+        # 回退: 构造标准路径(注意: 子域 DC 的 config NC 在林根,不在本域)
+        return 'CN=Configuration,%s' % self.domain_dumper.root

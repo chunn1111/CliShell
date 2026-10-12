@@ -40,14 +40,17 @@ class BasicInfoMixin:
         )
         user_entry = self.client.entries[0] if self.client.entries else None
 
-        # ── 2. 查询域 SID + MQA ──────────────────────────────
+        # ── 2. 查询域 SID + MQA + 密码策略 ─────────────────
         self.client.search(
             self.domain_dumper.root,
             '(objectClass=domain)',
-            attributes=['objectSid', 'ms-DS-MachineAccountQuota'],
+            attributes=['objectSid', 'ms-DS-MachineAccountQuota',
+                        'pwdHistoryLength', 'minPwdAge'],
         )
         domain_sid = 'N/A'
         mqa = 'N/A'
+        pwd_history = 'N/A'
+        min_pwd_age = 'N/A'
         if self.client.entries:
             try:
                 domain_sid = str(self.client.entries[0]['objectSid'].value)
@@ -59,6 +62,32 @@ class BasicInfoMixin:
                 mqa = str(mqa) if mqa is not None else 'Not Set'
             except Exception:
                 mqa = 'N/A'
+            try:
+                # pwdHistoryLength: 0 = 未开启 (不记住旧密码), >0 = 记住最近 N 个密码
+                hist_len = self.client.entries[0]['pwdHistoryLength'].value
+                if hist_len is None or int(hist_len) <= 0:
+                    pwd_history = 'Disabled (remember 0)'
+                else:
+                    pwd_history = 'Enabled (remember last %d)' % int(hist_len)
+            except Exception:
+                pwd_history = 'N/A'
+            try:
+                # minPwdAge: ldap3 返回 timedelta (原始为负数 100ns 间隔) → 换算为天数
+                # 0 = 可立即重复改密 (连续改 N+1 次即可绕过密码历史用回原密码)
+                age_raw = self.client.entries[0]['minPwdAge'].value
+                if age_raw is None:
+                    min_pwd_age = 'N/A'
+                else:
+                    if isinstance(age_raw, datetime.timedelta):
+                        days = abs(age_raw.total_seconds()) / 86400
+                    else:
+                        days = abs(int(age_raw)) / 10000000.0 / 86400
+                    days_str = '%d' % days if days == int(days) else '%.1f' % days
+                    min_pwd_age = '%s day(s)' % days_str
+                    if days == 0:
+                        min_pwd_age += ' (can change immediately — 密码历史可绕过)'
+            except Exception:
+                min_pwd_age = 'N/A'
 
         # ── 3. 查询所有域控制器 ──────────────────────────────
         try:
@@ -136,7 +165,7 @@ class BasicInfoMixin:
                 else:
                     pwd_expires = 'Never (account policy)'
             elif isinstance(account_expires, datetime.datetime):
-                pwd_expires = account_expires.strftime("%Y-%m-%d %H:%M:%S")
+                pwd_expires = ad_timestamp_to_str(account_expires)
             else:
                 pwd_expires = ad_timestamp_to_str(account_expires)
 
@@ -166,6 +195,8 @@ class BasicInfoMixin:
             rows.append(['User Info', '(unable to query)'])
 
         rows.append(['MachineAccountQuota', mqa])
+        rows.append(['Pwd History Policy', pwd_history])
+        rows.append(['Min Pwd Age', min_pwd_age])
 
         # 域统计
         rows.append(['Domain Users', str(user_count)])

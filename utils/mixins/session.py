@@ -18,7 +18,7 @@ from ldap3.utils.conv import escape_filter_chars
 from utils.ui import print_info, print_success, print_found, print_warn, print_error
 from utils.helpers import (
     parse_args, ad_timestamp_to_str,
-    paged_search, print_table,
+    paged_search, print_table, resolve_host_ip,
 )
 
 
@@ -225,13 +225,12 @@ class SessionMixin:
         通过 LDAP 枚举域内所有计算机，逐台 RPC 调用 WKSSVC
         NetrWkstaUserEnum 查找目标用户的登录会话。
         """
-        import socket
-
-        args = parse_args(line, 1, 1, "find_sessions <username>  (e.g. find_sessions administrator)")
+        args = parse_args(line, 1, 2, "find_sessions <username> [limit]  (e.g. find_sessions administrator [5])")
         if not args:
             return
 
         target_user = args[0].lower()
+        max_hosts = int(args[1]) if len(args) > 1 and args[1].isdigit() else 0  # 0=不限制
 
         # 验证用户是否存在
         self.client.search(
@@ -264,19 +263,22 @@ class SessionMixin:
             computers.append((sam, dns))
 
         total = len(computers)
+        if max_hosts and total > max_hosts:
+            computers = computers[:max_hosts]
+            total = len(computers)
+            print_info("Limit enabled: only scanning first %d computer(s)" % total)
         print_info("Searching for '%s' across %d computer(s)..." % (target_user, total))
         print()
 
         # 逐台查询
         found = []
         for idx, (sam, dns) in enumerate(computers, 1):
-            # 解析 IP
+            # 解析 IP (系统 DNS → DC 直查回退, 非域机器也能解析)
             if not dns:
                 print_error("  [%d/%d] %s — skipped (no dNSHostName)" % (idx, total, sam))
                 continue
-            try:
-                ip = socket.gethostbyname(dns)
-            except Exception:
+            ip = resolve_host_ip(dns, self.dc_address)
+            if not ip:
                 print_error("  [%d/%d] %s — skipped (unresolved: %s)" % (idx, total, sam, dns))
                 continue
 

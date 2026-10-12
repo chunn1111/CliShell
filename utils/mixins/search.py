@@ -8,7 +8,7 @@ import shlex
 from ldap3.utils.conv import escape_filter_chars
 
 from utils.ui import print_info, print_success, print_found, print_warn
-from utils.helpers import parse_args, display_entries, paged_search
+from utils.helpers import parse_args, display_entries, paged_search, print_table_capped
 
 
 class SearchMixin:
@@ -91,7 +91,11 @@ class SearchMixin:
             self.client, self.domain_dumper.root, filt,
             attributes=['name', 'distinguishedName', 'description'],
         )
-        self._print_results(entries, ['name', 'description'])
+        print_success("Found %d result(s)" % len(entries))
+        rows = [[e['name'].value or '-',
+                 e['description'].value or '-',
+                 e.entry_dn] for e in entries]
+        print_table_capped(['Name', 'Description', 'DN'], rows, tag='search_ou')
 
     # ── search_spn ────────────────────────────────────────────
     def do_search_spn(self, line):

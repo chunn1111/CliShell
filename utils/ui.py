@@ -126,6 +126,8 @@ help_items = [
         ("find_gp_link", "GpLink 权限发现 (链接 GPO)"),
         ("find_write_spn", "WriteSPN 权限发现 (Targeted Kerberoast)"),
         ("find_write_account_restrictions", "WriteAccountRestrictions 权限发现"),
+        ("find_write_property", "WriteProperty 权限发现 (写特定属性)"),
+        ("find_create_child", "CreateChild 权限发现 (创建子对象)"),
         ("find_sid_history", "SIDHistory 对象发现"),
         ("find_owns", "非默认 Owner 对象发现"),
         ("grant_control <target> <grantee>", "授予 GenericAll (完全控制)"),
@@ -178,8 +180,10 @@ help_items = [
     ]),
     ("Security Assessment", [
         ("find_kerberoastable", "Kerberoastable 用户 (有 SPN 的启用账户)"),
-        ("find_preauth_disabled", "AS-REP Roastable 用户 (不需预认证)"),
+        ("find_preauth_disabled", "AS-REP Roastable 用户 (不需预认证) + CVE-2022-33679 检测"),
         ("find_gpp_passwords", "GPP 密码解密 (SYSVOL Groups.xml 等)"),
+        ("find_sysvol_files [keyword]", "SYSVOL 敏感文件 (脚本/配置/凭据)"),
+        ("find_sysvol_secrets", "SYSVOL 文件敏感信息扫描 (密码/密钥)"),
     ]),
     ("Connection", [
         ("get_basic_info", "域基本信息 (用户/机器/会话状态)"),

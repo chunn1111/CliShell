@@ -6,6 +6,11 @@ Shared LDAP helper utilities for CliShell mixins.
 """
 
 import re
+import os
+import csv
+import socket
+import struct
+import ipaddress
 import datetime
 import shlex
 import ldap3
@@ -65,23 +70,32 @@ _AD_EPOCH = datetime.datetime(1601, 1, 1)
 
 def ad_timestamp_to_str(ts):
     """
-    将 AD 时间戳转为可读字符串。
+    将 AD 时间戳转为可读字符串 (本地时区)。
+    AD 存储的时间是 UTC, 直接显示会与本地时间有时差误读 (如 UTC+8 差 8 小时),
+    统一 astimezone() 转为本机时区。
     ldap3 可能返回以下类型:
       - int (原始 100ns 时间戳)
-      - datetime.datetime (ldap3 自动转换)
+      - datetime.datetime (ldap3 自动转换, 通常带 UTC tzinfo)
       - str / bytes
       - None / 0
     """
     if ts is None or ts == 0:
         return "Never"
-    # ldap3 已自动转为 datetime 对象
     if isinstance(ts, datetime.datetime):
-        return ts.strftime("%Y-%m-%d %H:%M:%S")
+        dt = ts
+    else:
+        try:
+            dt = _AD_EPOCH + datetime.timedelta(microseconds=int(ts) / 10)
+        except (OverflowError, ValueError, OSError, TypeError):
+            return "Invalid"
+    # UTC → 本地时区
     try:
-        dt = _AD_EPOCH + datetime.timedelta(microseconds=int(ts) / 10)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except (OverflowError, ValueError, OSError, TypeError):
-        return "Invalid"
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        dt = dt.astimezone()
+    except Exception:
+        pass
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 
@@ -284,6 +298,167 @@ def print_table(header, rows):
         print(fmt.format(*r))
 
 
+# 控制台表格最大显示行数 — 大域 find_* 结果可能成千上万行,
+# 全打控制台会刷屏丢记录, 超出部分落盘 report/*.csv
+PRINT_ROW_LIMIT = 100
+
+
+def print_table_capped(header, rows, tag='result', limit=PRINT_ROW_LIMIT,
+                       report_dir='report'):
+    """
+    打印表格, 超过 limit 行时控制台只显示前 limit 行,
+    完整结果保存到 <report_dir>/<tag>_<时间戳>.csv 并打印文件路径。
+    """
+    if len(rows) <= limit:
+        print_table(header, rows)
+        return
+
+    print_table(header, rows[:limit])
+
+    os.makedirs(report_dir, exist_ok=True)
+    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    safe_tag = re.sub(r'[^A-Za-z0-9_.-]+', '_', tag)
+    path = os.path.join(report_dir, '%s_%s.csv' % (safe_tag, ts))
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+    print_warn("Too many rows — showing first %d of %d" % (limit, len(rows)))
+    print_success("Full results saved: %s (%d rows)" % (path, len(rows)))
+
+
+
+# ═══════════════════════════════════════════════════════════════
+#  DNS 解析 (零依赖, 直接 UDP 查询指定 server)
+# ═══════════════════════════════════════════════════════════════
+
+def _skip_dns_name(data, offset):
+    """跳过 DNS 报文中的域名 (处理指针压缩), 返回下一字段偏移。"""
+    while offset < len(data):
+        length = data[offset]
+        if length == 0:
+            return offset + 1
+        if length & 0xC0 == 0xC0:  # 指针压缩 (2 字节)
+            return offset + 2
+        offset += 1 + length
+    return offset
+
+
+def dns_resolve_a(name, server, timeout=2.0, qid=0x1234):
+    """向指定 DNS server 查询 A 记录, 返回 IPv4 列表。
+
+    零依赖: 用 struct + socket 自行构造/解析 DNS 报文 (RFC 1035)。
+    先 UDP/53, 失败自动回退 TCP/53 (跨网段/防火墙环境 UDP 常被拦)。
+    用于系统 gethostbyname 无法解析 (如本机不在域内) 时直接问 DC。
+    失败返回空列表。
+    """
+    name = (name or '').strip().rstrip('.')
+    if not name:
+        return []
+    # 构造标准递归查询: header(12) + question
+    header = struct.pack('>HHHHHH', qid, 0x0100, 1, 0, 0, 0)
+    qname = b''.join(
+        bytes([len(lbl)]) + lbl.encode()
+        for lbl in name.split('.')
+    ) + b'\x00'
+    query = header + qname + struct.pack('>HH', 1, 1)  # QTYPE=A, QCLASS=IN
+
+    data = b''
+    # 先试 UDP
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(query, (server, 53))
+        data, _ = sock.recvfrom(2048)
+    except Exception:
+        data = b''
+    finally:
+        sock.close()
+
+    # UDP 失败 → TCP 回退 (报文前加 2 字节长度前缀)
+    if not data:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout + 1)
+        try:
+            sock.connect((server, 53))
+            sock.sendall(struct.pack('>H', len(query)) + query)
+            hdr = b''
+            while len(hdr) < 2:
+                chunk = sock.recv(2 - len(hdr))
+                if not chunk:
+                    raise IOError('short read')
+                hdr += chunk
+            mlen = struct.unpack('>H', hdr)[0]
+            while len(data) < mlen:
+                chunk = sock.recv(mlen - len(data))
+                if not chunk:
+                    break
+                data += chunk
+        except Exception:
+            return []
+        finally:
+            sock.close()
+
+    if len(data) < 12:
+        return []
+    qdcount = struct.unpack('>H', data[4:6])[0]
+    ancount = struct.unpack('>H', data[6:8])[0]
+
+    # 跳过 question section
+    offset = 12
+    for _ in range(qdcount):
+        offset = _skip_dns_name(data, offset)
+        offset += 4  # QTYPE + QCLASS
+
+    # 解析 answer section, 收集 A 记录
+    ips = []
+    for _ in range(ancount):
+        offset = _skip_dns_name(data, offset)
+        if offset + 10 > len(data):
+            break
+        rtype, _rclass, _ttl, rdlength = struct.unpack('>HHIH', data[offset:offset + 10])
+        offset += 10
+        if rtype == 1 and rdlength == 4 and offset + 4 <= len(data):
+            ips.append('.'.join(str(b) for b in data[offset:offset + 4]))
+        offset += rdlength
+    return ips
+
+
+def resolve_host_ip(name, dns_server=None):
+    """解析主机名为 IPv4, 三级回退:
+
+      1) 本身已是合法 IP → 原样返回
+      2) 系统 gethostbyname (运行机在域内时通常即可)
+      3) (给定 dns_server 时) 直接向该 server (如 DC) 的 53 端口查 A 记录,
+         使非域机器也能解析域内主机名
+
+    解析失败返回 None。
+    """
+    if not name:
+        return None
+    name = str(name).strip()
+    if not name:
+        return None
+    # 1. 已是合法 IP
+    try:
+        ipaddress.ip_address(name)
+        return name
+    except ValueError:
+        pass
+    # 2. 系统解析
+    try:
+        return socket.gethostbyname(name)
+    except Exception:
+        pass
+    # 3. 直接问指定 DNS server (DC)
+    if dns_server:
+        ips = dns_resolve_a(name, dns_server)
+        if ips:
+            return ips[0]
+    return None
+
+
 
 # ═══════════════════════════════════════════════════════════════
 #  分页查询
@@ -294,7 +469,8 @@ PAGED_SIZE = 1000
 
 
 def paged_search(client, search_base, search_filter, attributes=None,
-                 paged_size=PAGED_SIZE, controls=None, search_scope=None):
+                 paged_size=PAGED_SIZE, controls=None, search_scope=None,
+                 progress=False):
     """
     执行 LDAP 分页查询，自动收集所有页的结果。
 
@@ -309,6 +485,7 @@ def paged_search(client, search_base, search_filter, attributes=None,
         attributes   — 要返回的属性列表 (默认 ['*'])
         paged_size   — 每页大小 (默认 1000)
         controls     — 额外的 LDAP controls
+        progress     — True 时每下载一页打印一次进度(大结果集防"假死")
 
     返回:
         list[ldap3.Entry] — 所有匹配的 entry 列表
@@ -327,12 +504,17 @@ def paged_search(client, search_base, search_filter, attributes=None,
     if search_scope:
         kwargs['search_scope'] = search_scope
 
+    if progress:
+        print("[*] downloading page 1 ...")
     client.search(**kwargs)
     all_entries.extend(client.entries)
+    if progress:
+        print("[*] downloaded %d entries ..." % len(all_entries))
 
     # 继续获取后续页
     # ldap3 将 cookie 存储在 client.result['controls'] 中
     total = len(all_entries)
+    page = 1
     while True:
         cookie = None
         try:
@@ -342,13 +524,16 @@ def paged_search(client, search_base, search_filter, attributes=None,
         if not cookie:
             break
 
-        # 使用相同参数 + cookie 继续查询
-        client.search(**kwargs)
+        # 必须把 cookie 传回 paged_cookie,否则每次都从第一页重新查 → 死循环
+        client.search(paged_cookie=cookie, **kwargs)
         new_entries = client.entries
         if not new_entries:
             break
         all_entries.extend(new_entries)
         total += len(new_entries)
+        page += 1
+        if progress:
+            print("[*] downloaded %d entries (page %d) ..." % (total, page))
 
         # 安全阀：防止无限循环
         if total > 100000:

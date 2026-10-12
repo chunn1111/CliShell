@@ -73,7 +73,7 @@ class ConnectionMixin:
                 self.client.server.host,
                 port=636,
                 use_ssl=True,
-                get_info=ldap3.ALL,
+                get_info=ldap3.OFFLINE_AD_2012_R2,
                 tls=ldap3.Tls(validate=ssl.CERT_NONE),
             )
             test_conn = ldap3.Connection(test_server, auto_bind=True)
@@ -472,19 +472,20 @@ class ConnectionMixin:
         _REPL_GCA   = '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2'
 
         # (edge_mask, edge_guid_bin_or_None, edge_label)
+        # [Bugfix] GenericWrite 映射形态是 0x00020028, 0x00020094 是 GENERIC_READ (只读)
         edge_defs = [
             (0x000f01ff,   None,                              'GenericAll'),
-            (0x00020094,   None,                              'GenericWrite'),
+            (0x00020028,   None,                              'GenericWrite'),
             (0x00040000,   None,                              'WriteDacl'),
             (0x00080000,   None,                              'WriteOwner'),
             (_MASK_CTRL,   None,                              'AllExtendedRights'),
             (_MASK_CTRL,   string_to_bin(_GUID_FCP),         'ForceChangePassword'),
             (_MASK_WPROP,  string_to_bin(_GUID_MEM),         'AddMember'),
             (_MASK_SELF,   string_to_bin(_GUID_MEM),         'AddSelf'),
-            (_MASK_RPROP,  string_to_bin(_GUID_LAPS),        'ReadLAPSPassword'),
-            (_MASK_RPROP,  string_to_bin(_GUID_GMSA),        'ReadGMSAPassword'),
+            (_MASK_CTRL,   string_to_bin(_GUID_LAPS),        'ReadLAPSPassword'),
+            (_MASK_CTRL,   string_to_bin(_GUID_GMSA),        'ReadGMSAPassword'),
             (_MASK_SELF,   string_to_bin(_GUID_SPN),         'WriteSPN'),
-            (_MASK_CTRL,   string_to_bin(_GUID_UAR),         'WriteAccountRestrictions'),
+            (_MASK_WPROP,  string_to_bin(_GUID_UAR),         'WriteAccountRestrictions'),
         ]
 
         excluded = self._get_acl_exclusions()
